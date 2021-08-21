@@ -18,26 +18,29 @@ var dialer = &net.Dialer{
 	DualStack: true,
 	KeepAlive: time.Minute,
 }
+var defaultTimeout = 5 * time.Minute
 
 func copyWithTimeout(at, bt time.Duration, a, b net.Conn) error {
 	buf := make([]byte, 1024)
 	for {
 		a.SetReadDeadline(time.Now().Add(at))
 		n, err := a.Read(buf)
+		if n != 0 {
+			buf = buf[:n]
+			b.SetWriteDeadline(time.Now().Add(bt))
+			n2, err := b.Write(buf)
+			if err != nil {
+				return err
+			}
+			if n != n2 {
+				return io.ErrShortWrite
+			}
+		}
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
 			return err
-		}
-		buf = buf[:n]
-		b.SetWriteDeadline(time.Now().Add(bt))
-		n2, err := b.Write(buf)
-		if err != nil {
-			return err
-		}
-		if n != n2 {
-			return io.ErrShortWrite
 		}
 	}
 }
@@ -54,11 +57,10 @@ func handleConn(a net.Conn) {
 		a.Close()
 		b.Close()
 	}()
-	wsTimeout := 5 * time.Minute
 	done := make(chan struct{}, 1)
 	var doneFlag int32 = 0
 	go func() {
-		err := copyWithTimeout(wsTimeout, wsTimeout, a, b)
+		err := copyWithTimeout(defaultTimeout, defaultTimeout, a, b)
 		if err != nil && err != io.EOF {
 			log.Println(err)
 		}
@@ -67,7 +69,7 @@ func handleConn(a net.Conn) {
 		}
 	}()
 	go func() {
-		err := copyWithTimeout(wsTimeout, wsTimeout, b, a)
+		err := copyWithTimeout(defaultTimeout, defaultTimeout, b, a)
 		if err != nil && err != io.EOF {
 			log.Println(err)
 		}
@@ -79,8 +81,8 @@ func handleConn(a net.Conn) {
 }
 
 func main() {
-	if len(os.Args) != 3 {
-		log.Println("Usage:", os.Args[0], " address-from address-to\r\n\r\nEg:\r\n", os.Args[0], "127.0.0.1:9222 unix:/tmp/chrome-run/.devtools.sock\r\n", os.Args[0], "unix:/tmp/chrome-run/.devtools.sock 127.0.0.1:9222")
+	if len(os.Args) < 3 {
+		log.Println("Usage:", os.Args[0], " address-from address-to [timeout]\r\n\r\nEg:\r\n", os.Args[0], "127.0.0.1:9222 unix:/tmp/chrome-run/.devtools.sock 5m\r\n", os.Args[0], "unix:/tmp/chrome-run/.devtools.sock 127.0.0.1:9222 5m")
 		os.Exit(1)
 		return
 	}
@@ -105,6 +107,16 @@ func main() {
 		log.Println("Read no unix: prefix")
 		os.Exit(1)
 		return
+	}
+
+	if len(os.Args) > 3 {
+		var err error
+		defaultTimeout, err = time.ParseDuration(os.Args[3])
+		if err != nil {
+			log.Println(err)
+			os.Exit(1)
+		}
+		log.Println("Timeout:", defaultTimeout)
 	}
 
 	_, _, err := net.SplitHostPort(tcpAddress)
